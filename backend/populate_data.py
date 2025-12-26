@@ -5,7 +5,7 @@ def populate_historical_data():
     conn = mysql.connector.connect(
         host="localhost",
         user="root",
-        password="4Skinz.123",
+        password="", # Pue MYSQL Workbench Password here
         database="dlsu_productivity_db"
     )
     cursor = conn.cursor()
