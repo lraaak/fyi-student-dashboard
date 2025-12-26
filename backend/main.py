@@ -33,7 +33,7 @@ app.add_middleware(
 # Use environment variables in production, fallback to localhost for development
 DB_HOST = os.getenv("DB_HOST", "localhost")
 DB_USER = os.getenv("DB_USER", "root")
-DB_PASSWORD = os.getenv("DB_PASSWORD", "YOUR_PASSWORD_HERE")
+DB_PASSWORD = os.getenv("DB_PASSWORD", "4Skinz.123")
 DB_NAME = os.getenv("DB_NAME", "dlsu_productivity_db")
 
 def get_db_connection():

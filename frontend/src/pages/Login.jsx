@@ -16,10 +16,13 @@ export default function Login() {
         setLoading(true);
 
         try {
+            console.log('Attempting login with:', email);
             await login(email, password);
+            console.log('Login successful!');
             navigate('/dashboard');
         } catch (err) {
-            setError('Invalid email or password');
+            console.error('Login error:', err);
+            setError(err.message || 'Invalid email or password');
         } finally {
             setLoading(false);
         }

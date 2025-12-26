@@ -15,22 +15,34 @@ export const AuthProvider = ({ children }) => {
     }, [token]);
 
     const login = async (email, password) => {
+        console.log('AuthContext: Creating FormData...');
         const formData = new FormData();
         formData.append('username', email);  // OAuth2 uses 'username' field
         formData.append('password', password);
 
-        const response = await fetch('http://localhost:8000/login', {
-            method: 'POST',
-            body: formData
-        });
+        console.log('AuthContext: Sending request to http://localhost:8000/login');
+        try {
+            const response = await fetch('http://localhost:8000/login', {
+                method: 'POST',
+                body: formData
+            });
 
-        if (!response.ok) {
-            throw new Error('Login failed');
+            console.log('AuthContext: Response received:', response.status);
+
+            if (!response.ok) {
+                const errorData = await response.json().catch(() => ({}));
+                console.error('AuthContext: Login failed:', errorData);
+                throw new Error(errorData.detail || 'Login failed');
+            }
+
+            const data = await response.json();
+            console.log('AuthContext: Login successful, setting token');
+            setToken(data.access_token);
+            return data;
+        } catch (error) {
+            console.error('AuthContext: Fetch error:', error);
+            throw error;
         }
-
-        const data = await response.json();
-        setToken(data.access_token);
-        return data;
     };
 
     const register = async (email, password, name) => {
