@@ -28,6 +28,11 @@ dist/
 *.db
 *.sqlite
 *.sql
+!migration.sql
+
+# Development scripts with hardcoded credentials
+backend/populate_data.py
+backend/create_demo_user.py
 
 # IDE
 .vscode/

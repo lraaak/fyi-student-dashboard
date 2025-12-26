@@ -3,4 +3,6 @@ uvicorn
 mysql-connector-python
 pandas
 scikit-learn
+python-jose[cryptography]
+passlib[bcrypt]
 python-multipart

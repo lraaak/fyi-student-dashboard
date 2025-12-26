@@ -1,5 +1,6 @@
 from fastapi import FastAPI, HTTPException, Depends
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.security import OAuth2PasswordRequestForm
 from pydantic import BaseModel
 import mysql.connector
 import pandas as pd
@@ -10,6 +11,7 @@ from sklearn.model_selection import cross_val_score, GridSearchCV
 from sklearn.metrics import mean_absolute_error
 from typing import List, Optional
 import os
+from auth import get_password_hash, verify_password, create_access_token, get_current_user_id
 
 app = FastAPI(title="FYI Backend")
 
@@ -28,11 +30,11 @@ app.add_middleware(
 )
 
 # --- Database Credentials ---
-# IMPORTANT: Update these with your actual credentials before running
-DB_HOST = "localhost"
-DB_USER = "root"
-DB_PASSWORD = "YOUR_PASSWORD_HERE"  # Replace with your MySQL password
-DB_NAME = "dlsu_productivity_db"
+# Use environment variables in production, fallback to localhost for development
+DB_HOST = os.getenv("DB_HOST", "localhost")
+DB_USER = os.getenv("DB_USER", "root")
+DB_PASSWORD = os.getenv("DB_PASSWORD", "YOUR_PASSWORD_HERE")
+DB_NAME = os.getenv("DB_NAME", "dlsu_productivity_db")
 
 def get_db_connection():
     try:
@@ -88,6 +90,25 @@ class PredictionOutput(BaseModel):
     projected_grade: float
     risk_level: str
     is_terror_prof: int  # Return this so frontend can display it
+
+# Authentication Models
+class UserCreate(BaseModel):
+    email: str
+    password: str
+    name: Optional[str] = None
+
+class UserLogin(BaseModel):
+    email: str
+    password: str
+
+class Token(BaseModel):
+    access_token: str
+    token_type: str
+
+class UserResponse(BaseModel):
+    user_id: int
+    email: str
+    name: Optional[str]
 
 # --- Global ML State ---
 ml_models = {}
@@ -270,10 +291,10 @@ def startup_event():
 # --- Subject Routes ---
 
 @app.get("/subjects", response_model=List[SubjectResponse])
-def get_subjects():
+def get_subjects(current_user_id: int = Depends(get_current_user_id)):
     conn = get_db_connection()
     cursor = conn.cursor(dictionary=True)
-    cursor.execute("SELECT * FROM subjects ORDER BY subject_code")
+    cursor.execute("SELECT * FROM subjects WHERE user_id = %s ORDER BY subject_code", (current_user_id,))
     subjects = cursor.fetchall()
     conn.close()
     return subjects
@@ -296,20 +317,20 @@ def get_model_metrics():
     }
 
 @app.post("/subjects")
-def create_or_update_subject(subject: SubjectCreate):
+def create_or_update_subject(subject: SubjectCreate, current_user_id: int = Depends(get_current_user_id)):
     conn = get_db_connection()
     cursor = conn.cursor()
     
-    # Upsert: Insert or Update on duplicate key
+    # Upsert: Insert or Update on duplicate key (with user_id)
     query = """
-        INSERT INTO subjects (subject_code, subject_name, is_terror_prof)
-        VALUES (%s, %s, %s)
+        INSERT INTO subjects (subject_code, subject_name, is_terror_prof, user_id)
+        VALUES (%s, %s, %s, %s)
         ON DUPLICATE KEY UPDATE 
             subject_name = VALUES(subject_name),
             is_terror_prof = VALUES(is_terror_prof)
     """
     name = subject.subject_name if subject.subject_name else subject.subject_code
-    values = (subject.subject_code, name, subject.is_terror_prof)
+    values = (subject.subject_code, name, subject.is_terror_prof, current_user_id)
     
     try:
         cursor.execute(query, values)
@@ -324,44 +345,109 @@ def create_or_update_subject(subject: SubjectCreate):
         conn.close()
         raise HTTPException(status_code=500, detail=str(err))
 
+# === AUTHENTICATION ENDPOINTS ===
+
+@app.post("/register", response_model=Token)
+def register(user: UserCreate):
+    """Register a new user."""
+    conn = get_db_connection()
+    cursor = conn.cursor(dictionary=True)
+    
+    # Check if email already exists
+    cursor.execute("SELECT user_id FROM users WHERE email = %s", (user.email,))
+    if cursor.fetchone():
+        conn.close()
+        raise HTTPException(status_code=400, detail="Email already registered")
+    
+    # Hash password and create user
+    hashed_password = get_password_hash(user.password)
+    cursor.execute(
+        "INSERT INTO users (email, password_hash, name) VALUES (%s, %s, %s)",
+        (user.email, hashed_password, user.name)
+    )
+    conn.commit()
+    user_id = cursor.lastrowid
+    conn.close()
+    
+    # Create access token
+    access_token = create_access_token(data={"user_id": user_id, "email": user.email})
+    return {"access_token": access_token, "token_type": "bearer"}
+
+@app.post("/login", response_model=Token)
+def login(form_data: OAuth2PasswordRequestForm = Depends()):
+    """Login and get JWT token."""
+    conn = get_db_connection()
+    cursor = conn.cursor(dictionary=True)
+    
+    # Find user by email (username field in OAuth2 form)
+    cursor.execute("SELECT * FROM users WHERE email = %s", (form_data.username,))
+    user = cursor.fetchone()
+    
+    if not user or not verify_password(form_data.password, user['password_hash']):
+        conn.close()
+        raise HTTPException(status_code=401, detail="Incorrect email or password")
+    
+    # Update last login
+    cursor.execute("UPDATE users SET last_login = NOW() WHERE user_id = %s", (user['user_id'],))
+    conn.commit()
+    conn.close()
+    
+    # Create access token
+    access_token = create_access_token(data={"user_id": user['user_id'], "email": user['email']})
+    return {"access_token": access_token, "token_type": "bearer"}
+
+@app.get("/users/me", response_model=UserResponse)
+def get_current_user(current_user_id: int = Depends(get_current_user_id)):
+    """Get current user info."""
+    conn = get_db_connection()
+    cursor = conn.cursor(dictionary=True)
+    cursor.execute("SELECT user_id, email, name FROM users WHERE user_id = %s", (current_user_id,))
+    user = cursor.fetchone()
+    conn.close()
+    
+    if not user:
+        raise HTTPException(status_code=404, detail="User not found")
+    return user
+
 # --- Task Routes ---
 
 @app.get("/tasks")
-def get_tasks():
+def get_tasks(current_user_id: int = Depends(get_current_user_id)):
     conn = get_db_connection()
     cursor = conn.cursor(dictionary=True)
-    # Join with subjects to include is_terror_prof in response
+    # Join with subjects to include is_terror_prof in response, filter by user
     cursor.execute("""
         SELECT a.*, COALESCE(s.is_terror_prof, 0) as is_terror_prof
         FROM assignment_logs a
-        LEFT JOIN subjects s ON a.subject_code = s.subject_code
+        LEFT JOIN subjects s ON a.subject_code = s.subject_code AND s.user_id = %s
+        WHERE a.user_id = %s
         ORDER BY a.task_id DESC LIMIT 50
-    """)
+    """, (current_user_id, current_user_id))
     tasks = cursor.fetchall()
     conn.close()
     return tasks
 
 @app.post("/tasks")
-def create_task(task: TaskCreate):
+def create_task(task: TaskCreate, current_user_id: int = Depends(get_current_user_id)):
     conn = get_db_connection()
     cursor = conn.cursor()
     
-    # Auto-create subject if it doesn't exist
+    # Auto-create subject if it doesn't exist (with user_id)
     cursor.execute("""
-        INSERT IGNORE INTO subjects (subject_code, subject_name, is_terror_prof)
-        VALUES (%s, %s, 0)
-    """, (task.subject_code, task.subject_code))
+        INSERT IGNORE INTO subjects (subject_code, subject_name, is_terror_prof, user_id)
+        VALUES (%s, %s, 0, %s)
+    """, (task.subject_code, task.subject_code, current_user_id))
     
-    # Insert the task (without is_terror_prof)
+    # Insert the task (with user_id)
     query = """
     INSERT INTO assignment_logs (
-        subject_code, assignment_name, task_category, difficulty_rating, 
+        user_id, subject_code, assignment_name, task_category, difficulty_rating, 
         days_to_deadline, predicted_hours, actual_hours_spent, 
         days_started_before_deadline, final_grade_received
-    ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
+    ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
     """
     values = (
-        task.subject_code, task.assignment_name, task.task_category, 
+        current_user_id, task.subject_code, task.assignment_name, task.task_category, 
         task.difficulty_rating, task.days_to_deadline, task.predicted_hours, 
         task.actual_hours_spent, task.days_started_before_deadline, 
         task.final_grade_received
@@ -382,14 +468,14 @@ def create_task(task: TaskCreate):
 # --- Prediction Route ---
 
 @app.post("/predict", response_model=PredictionOutput)
-def predict_outcome(data: PredictionInput):
+def predict_outcome(data: PredictionInput, current_user_id: int = Depends(get_current_user_id)):
     if 'duration_model' not in ml_models:
         raise HTTPException(status_code=400, detail="Models not trained yet (need more data)")
     
-    # Lookup subject's terror status from DB
+    # Lookup subject's terror status from DB (filtered by user)
     conn = get_db_connection()
     cursor = conn.cursor(dictionary=True)
-    cursor.execute("SELECT is_terror_prof FROM subjects WHERE subject_code = %s", (data.subject,))
+    cursor.execute("SELECT is_terror_prof FROM subjects WHERE subject_code = %s AND user_id = %s", (data.subject, current_user_id))
     result = cursor.fetchone()
     
     is_terror = result['is_terror_prof'] if result else 0
