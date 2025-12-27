@@ -19,6 +19,7 @@ app = FastAPI(title="FYI Backend")
 origins = [
     "http://localhost:5173",
     "http://127.0.0.1:5173",
+    os.getenv("FRONTEND_URL", "*"), # Fallback to * for initial setup if needed, but preferably set on Render
 ]
 
 app.add_middleware(
